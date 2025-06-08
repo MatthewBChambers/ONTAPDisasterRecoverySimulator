@@ -4,8 +4,52 @@ import time
 import click
 from rich.console import Console
 import os
+from fastapi import FastAPI
+import uvicorn
+from threading import Thread, Event
+import signal
+import psutil
+import asyncio
 
 console = Console()
+processes = []
+app = FastAPI()
+shutdown_event = Event()
+
+def kill_proc_tree(pid, include_parent=True):
+    """Kill a process tree (including grandchildren) with given pid."""
+    try:
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
+        
+        # First try graceful termination
+        for child in children:
+            try:
+                child.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        
+        # Give them some time to terminate
+        gone, alive = psutil.wait_procs(children, timeout=2)
+        
+        # If still alive, kill forcefully
+        for p in alive:
+            try:
+                p.kill()
+            except psutil.NoSuchProcess:
+                pass
+                
+        if include_parent:
+            try:
+                parent.terminate()
+                parent.wait(2)
+            except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                try:
+                    parent.kill()
+                except psutil.NoSuchProcess:
+                    pass
+    except psutil.NoSuchProcess:
+        pass
 
 def start_component(command, name):
     """Start a component and return its process."""
@@ -18,16 +62,60 @@ def start_component(command, name):
             creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
         )
         console.print(f"[green]Started {name}[/green]")
+        processes.append((process, name))
         return process
     except Exception as e:
         console.print(f"[red]Failed to start {name}: {e}[/red]")
         return None
+
+def cleanup_processes():
+    """Cleanup all running processes."""
+    global processes
+    
+    # First try graceful shutdown
+    for process, name in processes:
+        if process and process.poll() is None:  # If process is still running
+            try:
+                console.print(f"[yellow]Stopping {name}...[/yellow]")
+                kill_proc_tree(process.pid)
+            except Exception as e:
+                console.print(f"[red]Error stopping {name}: {e}[/red]")
+    
+    # Clear the processes list
+    processes = []
+
+@app.post("/shutdown")
+async def shutdown():
+    """Endpoint to shutdown all simulator components."""
+    cleanup_processes()
+    shutdown_event.set()
+    return {"status": "success", "message": "All components shut down"}
+
+def run_control_server():
+    """Run the control server for shutdown coordination."""
+    config = uvicorn.Config(app, host="localhost", port=8000, log_level="error")
+    server = uvicorn.Server(config)
+    
+    # Override server install_signal_handlers to prevent conflict
+    server.install_signal_handlers = lambda: None
+    
+    try:
+        server.run()
+    except Exception as e:
+        console.print(f"[red]Control server error: {e}[/red]")
 
 @click.command()
 @click.option('--debug/--no-debug', default=False, help='Run in debug mode')
 def main(debug):
     """Start the ONTAP HA Pair Simulator"""
     console.print("[bold blue]Starting ONTAP HA Pair Simulator...[/bold blue]")
+
+    # Start control server in a separate thread
+    control_thread = Thread(target=run_control_server, daemon=True)
+    control_thread.start()
+
+    # Give the control server a moment to start
+    time.sleep(1)
 
     # Start Node A
     node_a = start_component(
@@ -49,6 +137,7 @@ def main(debug):
 
     if not all([node_a, node_b, controller]):
         console.print("[red]Failed to start all components. Shutting down...[/red]")
+        cleanup_processes()
         sys.exit(1)
 
     console.print("\n[bold green]All components started successfully![/bold green]")
@@ -58,16 +147,28 @@ def main(debug):
     console.print("\nUse the CLI to interact with the simulator:")
     console.print("python client/cli.py --help")
 
+    def signal_handler(signum, frame):
+        """Handle shutdown signals"""
+        if not shutdown_event.is_set():
+            console.print("\n[yellow]Shutting down simulator...[/yellow]")
+            cleanup_processes()
+            shutdown_event.set()
+            console.print("[green]Shutdown complete[/green]")
+            sys.exit(0)
+        else:
+            # Force exit if already shutting down
+            console.print("\n[red]Forcing shutdown...[/red]")
+            sys.exit(1)
+
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     try:
-        while True:
-            time.sleep(1)
+        while not shutdown_event.is_set():
+            time.sleep(0.1)  # More responsive than 1 second
     except KeyboardInterrupt:
-        console.print("\n[yellow]Shutting down simulator...[/yellow]")
-        for process in [node_a, node_b, controller]:
-            if process:
-                process.terminate()
-                process.wait()
-        console.print("[green]Shutdown complete[/green]")
+        signal_handler(signal.SIGINT, None)
 
 if __name__ == '__main__':
     main() 

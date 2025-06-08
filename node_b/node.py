@@ -4,11 +4,16 @@ import uvicorn
 from datetime import datetime
 import sys
 import os
+import ctypes
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models import Node, NodeStatus, Volume, LogicalInterface, NVRAMEntry, LIFStatus
+
+# Set console window title
+if os.name == 'nt':  # Windows
+    ctypes.windll.kernel32.SetConsoleTitleW("ONTAP HA Pair Simulator - Node B")
 
 app = FastAPI(title="ONTAP Node B")
 
@@ -72,8 +77,28 @@ async def get_status():
 @app.post("/takeover")
 async def initiate_takeover():
     """Take over for failed partner node."""
+    if node.status == NodeStatus.TAKEOVER:
+        # Already in takeover mode
+        return {"message": "Already in takeover mode", "timestamp": datetime.now()}
+        
     node.status = NodeStatus.TAKEOVER
+    
     # Accept migrated LIFs from partner
+    partner_lifs = [
+        LogicalInterface(
+            name="lif1",
+            ip_address="192.168.1.10",
+            current_node="node-b",  # Now on this node
+            home_node="node-a",     # Originally from partner
+            protocol="nfs",
+            port=2049,
+            status=LIFStatus.ONLINE
+        )
+    ]
+    
+    # Add partner LIFs to our list
+    node.lifs.extend(partner_lifs)
+    
     return {"message": "Takeover initiated", "timestamp": datetime.now()}
 
 @app.post("/nvram/sync")

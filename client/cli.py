@@ -9,11 +9,120 @@ from datetime import datetime
 import time
 import sys
 import os
+import subprocess
+import atexit
+import signal
+import psutil
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 console = Console()
+simulator_process = None
+CONTROL_URL = "http://localhost:8000"
+shutdown_in_progress = False
+
+def kill_proc_tree(pid, include_parent=True):
+    """Kill a process tree (including grandchildren) with given pid."""
+    try:
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
+        
+        # First try graceful termination
+        for child in children:
+            try:
+                child.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        
+        # Give them some time to terminate
+        gone, alive = psutil.wait_procs(children, timeout=2)
+        
+        # If still alive, kill forcefully
+        for p in alive:
+            try:
+                p.kill()
+            except psutil.NoSuchProcess:
+                pass
+                
+        if include_parent:
+            try:
+                parent.terminate()
+                parent.wait(2)
+            except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                try:
+                    parent.kill()
+                except psutil.NoSuchProcess:
+                    pass
+    except psutil.NoSuchProcess:
+        pass
+
+def start_simulator():
+    """Start the simulator process if not already running"""
+    global simulator_process
+    if simulator_process is None:
+        try:
+            # Get the path to main.py relative to cli.py
+            main_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'main.py')
+            simulator_process = subprocess.Popen(
+                [sys.executable, main_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
+            )
+            # Wait a bit for services to start
+            time.sleep(3)
+            console.print("[green]Started ONTAP HA Pair Simulator[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed to start simulator: {e}[/red]")
+            sys.exit(1)
+
+def stop_simulator():
+    """Stop the simulator process if running"""
+    global simulator_process, shutdown_in_progress
+    
+    if shutdown_in_progress:
+        return
+        
+    if simulator_process:
+        try:
+            shutdown_in_progress = True
+            console.print("[yellow]Shutting down simulator...[/yellow]")
+            
+            # First try to gracefully shutdown through the control server
+            try:
+                requests.post(f"{CONTROL_URL}/shutdown", timeout=2)
+            except requests.RequestException:
+                pass  # Control server might already be down
+            
+            # Kill the process tree
+            if simulator_process.poll() is None:  # If still running
+                kill_proc_tree(simulator_process.pid)
+            
+            console.print("[green]Stopped ONTAP HA Pair Simulator[/green]")
+            
+        except Exception as e:
+            console.print(f"[red]Error stopping simulator: {e}[/red]")
+        finally:
+            simulator_process = None
+            shutdown_in_progress = False
+
+def signal_handler(signum, frame):
+    """Handle interrupt signals"""
+    if not shutdown_in_progress:
+        stop_simulator()
+        sys.exit(0)
+    else:
+        # Force exit if already shutting down
+        console.print("\n[red]Forcing shutdown...[/red]")
+        if simulator_process and simulator_process.poll() is None:
+            kill_proc_tree(simulator_process.pid, include_parent=True)
+        sys.exit(1)
+
+# Register cleanup function and signal handlers
+atexit.register(stop_simulator)
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 class ONTAPSimulator:
     def __init__(self):
@@ -72,7 +181,8 @@ class ONTAPSimulator:
 @click.group()
 def cli():
     """ONTAP HA Pair Simulator CLI"""
-    pass
+    # Start simulator when any command is run
+    start_simulator()
 
 @cli.command()
 def status():
@@ -117,11 +227,19 @@ def monitor():
     """Monitor HA pair status in real-time"""
     simulator = ONTAPSimulator()
     
-    with Live(auto_refresh=False) as live:
-        while True:
-            simulator.display_status()
-            live.refresh()
-            time.sleep(2)
+    try:
+        with Live(auto_refresh=False) as live:
+            while True:
+                simulator.display_status()
+                live.refresh()
+                time.sleep(2)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopping monitor...[/yellow]")
+        stop_simulator()
+        sys.exit(0)
 
 if __name__ == '__main__':
-    cli() 
+    try:
+        cli()
+    finally:
+        stop_simulator() 
