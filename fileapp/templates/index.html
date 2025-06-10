@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ONTAP File Access</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+    <div class="container py-5">
+        <h1 class="mb-4">ONTAP File Storage</h1>
+        
+        <!-- Node Status -->
+        <div class="alert alert-info mb-4">
+            <i class="fas fa-server me-2"></i>
+            Currently connected to: <strong>{{ active_node }}</strong>
+        </div>
+        
+        <!-- Upload Form -->
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">Upload File</h5>
+                <form action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data" class="mb-0">
+                    <div class="input-group">
+                        <input type="file" class="form-control" name="file" required>
+                        <button type="submit" class="btn btn-primary">Upload</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- File List -->
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">Files</h5>
+                {% if files %}
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Size</th>
+                                <th>Modified</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for file in files %}
+                            <tr>
+                                <td>{{ file.name }}</td>
+                                <td>{{ (file.size / 1024)|round(1) }} KB</td>
+                                <td>{{ file.modified }}</td>
+                                <td>
+                                    <div class="btn-group" role="group">
+                                        <a href="{{ url_for('download_file', filename=file.name) }}" 
+                                           class="btn btn-sm btn-success">
+                                            <i class="fas fa-download"></i>
+                                        </a>
+                                        <a href="{{ url_for('delete_file', filename=file.name) }}" 
+                                           class="btn btn-sm btn-danger"
+                                           onclick="return confirm('Are you sure you want to delete this file?')">
+                                            <i class="fas fa-trash"></i>
+                                        </a>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <p class="text-muted mb-0">No files found.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html> 

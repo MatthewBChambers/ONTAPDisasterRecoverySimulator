@@ -1,10 +1,13 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import uvicorn
 from datetime import datetime
 import sys
 import os
 import ctypes
+from pathlib import Path
+import shutil
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,6 +17,10 @@ from models import Node, NodeStatus, Volume, LogicalInterface, NVRAMEntry, LIFSt
 # Set console window title
 if os.name == 'nt':  # Windows
     ctypes.windll.kernel32.SetConsoleTitleW("ONTAP HA Pair Simulator - Node B")
+
+# Define storage path
+STORAGE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "shared_storage")
+os.makedirs(STORAGE_PATH, exist_ok=True)
 
 app = FastAPI(title="ONTAP Node B")
 
@@ -119,6 +126,70 @@ async def prepare_giveback():
             lif.status = LIFStatus.MIGRATING
     
     return {"message": "Ready for giveback", "timestamp": datetime.now()}
+
+@app.get("/files")
+async def list_files():
+    """List all files in storage."""
+    if node.status == NodeStatus.FAILED:
+        raise HTTPException(status_code=503, detail="Node is in failed state")
+    
+    try:
+        files = []
+        for file_path in Path(STORAGE_PATH).glob("*"):
+            if file_path.is_file():
+                files.append({
+                    "name": file_path.name,
+                    "size": file_path.stat().st_size,
+                    "modified": datetime.fromtimestamp(file_path.stat().st_mtime)
+                })
+        return {"files": files}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/files/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """Upload a file to storage."""
+    if node.status == NodeStatus.FAILED:
+        raise HTTPException(status_code=503, detail="Node is in failed state")
+    
+    try:
+        file_path = os.path.join(STORAGE_PATH, file.filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        return {"message": f"File {file.filename} uploaded successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/files/{filename}")
+async def download_file(filename: str):
+    """Download a file from storage."""
+    if node.status == NodeStatus.FAILED:
+        raise HTTPException(status_code=503, detail="Node is in failed state")
+    
+    file_path = os.path.join(STORAGE_PATH, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    try:
+        return FileResponse(file_path, filename=filename)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/files/{filename}")
+async def delete_file(filename: str):
+    """Delete a file from storage."""
+    if node.status == NodeStatus.FAILED:
+        raise HTTPException(status_code=503, detail="Node is in failed state")
+    
+    file_path = os.path.join(STORAGE_PATH, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    try:
+        os.remove(file_path)
+        return {"message": f"File {filename} deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8002) 

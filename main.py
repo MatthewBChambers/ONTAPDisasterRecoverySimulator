@@ -4,6 +4,7 @@ import time
 import click
 from rich.console import Console
 import os
+import ctypes
 from fastapi import FastAPI
 import uvicorn
 from threading import Thread, Event
@@ -51,7 +52,7 @@ def kill_proc_tree(pid, include_parent=True):
     except psutil.NoSuchProcess:
         pass
 
-def start_component(command, name):
+def start_component(command, name, new_console=True):
     """Start a component and return its process."""
     try:
         process = subprocess.Popen(
@@ -59,7 +60,7 @@ def start_component(command, name):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
+            creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' and new_console else 0
         )
         console.print(f"[green]Started {name}[/green]")
         processes.append((process, name))
@@ -104,10 +105,16 @@ def run_control_server():
     except Exception as e:
         console.print(f"[red]Control server error: {e}[/red]")
 
+def set_window_title(title):
+    """Set the console window title."""
+    if os.name == 'nt':
+        ctypes.windll.kernel32.SetConsoleTitleW(title)
+
 @click.command()
 @click.option('--debug/--no-debug', default=False, help='Run in debug mode')
 def main(debug):
     """Start the ONTAP HA Pair Simulator"""
+    set_window_title("ONTAP HA Pair Simulator - Main Controller")
     console.print("[bold blue]Starting ONTAP HA Pair Simulator...[/bold blue]")
 
     # Start control server in a separate thread
@@ -135,7 +142,14 @@ def main(debug):
         "HA Controller"
     )
 
-    if not all([node_a, node_b, controller]):
+    # Start File Application (without new console)
+    fileapp = start_component(
+        ["python", "fileapp/app.py"],
+        "File Application",
+        new_console=False
+    )
+
+    if not all([node_a, node_b, controller, fileapp]):
         console.print("[red]Failed to start all components. Shutting down...[/red]")
         cleanup_processes()
         sys.exit(1)
@@ -144,6 +158,7 @@ def main(debug):
     console.print("\nAvailable endpoints:")
     console.print("- Node A: http://localhost:8001")
     console.print("- Node B: http://localhost:8002")
+    console.print("- File Application: http://localhost:5000")
     console.print("\nUse the CLI to interact with the simulator:")
     console.print("python client/cli.py --help")
 
